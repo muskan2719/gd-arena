@@ -10,6 +10,14 @@ type SpeechRecognitionType = any;
 const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 const BACKEND_URL = API_BASE;
 
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+  ],
+};
+
 export interface GDMeetingRoomProps {
   topic: string;
   durationMinutes: number;
@@ -295,6 +303,143 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
       });
     }
   };
+
+  // WebRTC Peer-to-Peer Live Voice Relay
+  const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
+  const remoteAudioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
+  const lastSignalTimeRef = useRef<number>(0);
+
+  const sendSignal = (toId: string, type: string, signalData: any) => {
+    fetch(`${BACKEND_URL}/api/room/signal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        room_id: roomId,
+        from_id: myId,
+        to_id: toId,
+        type: type,
+        signal: signalData,
+      }),
+    }).catch(() => {});
+  };
+
+  const getOrCreatePeerConnection = (remotePeerId: string): RTCPeerConnection => {
+    if (peerConnectionsRef.current[remotePeerId]) {
+      return peerConnectionsRef.current[remotePeerId];
+    }
+
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peerConnectionsRef.current[remotePeerId] = pc;
+
+    // Attach local microphone audio tracks if available
+    if (micStreamRef.current) {
+      micStreamRef.current.getAudioTracks().forEach((track) => {
+        pc.addTrack(track, micStreamRef.current!);
+      });
+    }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        sendSignal(remotePeerId, "candidate", event.candidate);
+      }
+    };
+
+    pc.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        let audioEl = remoteAudioElementsRef.current[remotePeerId];
+        if (!audioEl) {
+          audioEl = new Audio();
+          audioEl.autoplay = true;
+          remoteAudioElementsRef.current[remotePeerId] = audioEl;
+        }
+        audioEl.srcObject = event.streams[0];
+        audioEl.play().catch((err) => console.log("Peer live audio playback deferred:", err));
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+        delete peerConnectionsRef.current[remotePeerId];
+        if (remoteAudioElementsRef.current[remotePeerId]) {
+          remoteAudioElementsRef.current[remotePeerId].pause();
+          delete remoteAudioElementsRef.current[remotePeerId];
+        }
+      }
+    };
+
+    pc.onnegotiationneeded = async () => {
+      try {
+        if (myId > remotePeerId) {
+          const offer = await pc.createOffer();
+          if (pc.signalingState !== "stable") return;
+          await pc.setLocalDescription(offer);
+          sendSignal(remotePeerId, "offer", pc.localDescription);
+        }
+      } catch (err) {
+        console.warn("WebRTC negotiation error with", remotePeerId, err);
+      }
+    };
+
+    return pc;
+  };
+
+  const handleIncomingSignal = async (s: any) => {
+    const fromId = s.from_id;
+    const type = s.type;
+    const payload = s.signal;
+    if (!fromId || !payload) return;
+
+    const pc = getOrCreatePeerConnection(fromId);
+
+    try {
+      if (type === "offer") {
+        if (pc.signalingState !== "stable") {
+          await Promise.all([
+            pc.setLocalDescription({ type: "rollback" } as any).catch(() => {}),
+            pc.setRemoteDescription(new RTCSessionDescription(payload)),
+          ]);
+        } else {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        }
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendSignal(fromId, "answer", pc.localDescription);
+      } else if (type === "answer") {
+        if (pc.signalingState === "have-local-offer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        }
+      } else if (type === "candidate") {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(payload));
+        } catch (e) {
+          console.warn("Error adding WebRTC ICE candidate:", e);
+        }
+      }
+    } catch (err) {
+      console.warn("Signal processing error for", type, err);
+    }
+  };
+
+  const pollSignals = async () => {
+    if (!isMeetingActiveRef.current) return;
+    try {
+      const res = await fetch(
+        `${BACKEND_URL}/api/room/${roomId}/signals?user_id=${myId}&since=${lastSignalTimeRef.current}`
+      );
+      const data = await res.json();
+      if (data && data.signals && Array.isArray(data.signals)) {
+        for (const s of data.signals) {
+          if (s.timestamp && s.timestamp > lastSignalTimeRef.current) {
+            lastSignalTimeRef.current = s.timestamp;
+          }
+          await handleIncomingSignal(s);
+        }
+      }
+      if (data && typeof data.server_time === "number") {
+        lastSignalTimeRef.current = Math.max(lastSignalTimeRef.current, data.server_time - 0.5);
+      }
+    } catch (e) {}
+  };
   const recognitionRef = useRef<SpeechRecognitionType | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -477,18 +622,24 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
             const peerSpeaking = typeof p.is_speaking === "boolean" ? p.is_speaking : (existing ? existing.isSpeaking : false);
             const peerHandRaised = typeof p.is_hand_raised === "boolean" ? p.is_hand_raised : (existing?.isHandRaised || false);
             const peerSpeech = p.last_speech || existing?.lastSpeech || "";
+            const peerMuted = typeof p.is_muted === "boolean" ? p.is_muted : (existing ? existing.isMuted : false);
 
             return {
               id: p.id,
               name: p.name || "Peer Candidate",
               isSpeaking: peerSpeaking,
-              isMuted: existing ? existing.isMuted : true,
+              isMuted: peerMuted,
               isHandRaised: peerHandRaised,
               lastSpeech: peerSpeech,
             };
           });
 
         setConnectedPeers(otherTiles);
+
+        // Ensure WebRTC connection exists for every connected human peer
+        otherTiles.forEach((peer) => {
+          getOrCreatePeerConnection(peer.id);
+        });
 
         // Check for active speaking peer to display live captions
         const activeSpeakingPeer = otherTiles.find((p) => p.isSpeaking && p.lastSpeech);
@@ -591,6 +742,7 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
             topic: topic,
             duration: durationMinutes * 60,
             active_agents: activeAgentIdsRef.current,
+            is_muted: !isMicActiveRef.current,
           }),
         });
         const data = await res.json();
@@ -604,7 +756,7 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
 
     registerAndPoll();
 
-    // 2. Poll Backend Room State every 1.5s for seamless Incognito & multi-device sync
+    // 2. Poll Backend Room State & WebRTC Signals every 1.5s
     const pollInterval = setInterval(async () => {
       if (!isMeetingActiveRef.current) return;
       try {
@@ -613,6 +765,10 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
         if (data) {
           applyIncomingRoomState(data);
         }
+      } catch (err) {}
+
+      try {
+        await pollSignals();
       } catch (err) {}
     }, 1500);
 
@@ -697,6 +853,13 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
                 : p
             )
           );
+        } else if (data.type === "PEER_MUTE" && data.userId) {
+          setConnectedPeers((prev) =>
+            prev.map((p) => (p.id === data.userId ? { ...p, isMuted: data.isMuted } : p))
+          );
+          setParticipants((prev) =>
+            prev.map((p) => (p.id === data.userId ? { ...p, isMuted: data.isMuted } : p))
+          );
         } else if (data.type === "PEER_HAND_RAISE" && data.userId) {
           setConnectedPeers((prev) =>
             prev.map((p) =>
@@ -777,6 +940,21 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
           user_id: currentUserIdRef.current,
         }),
       }).catch(() => {});
+
+      // Cleanup WebRTC connections and remote audio elements
+      Object.values(peerConnectionsRef.current).forEach((pc) => {
+        try {
+          pc.close();
+        } catch (e) {}
+      });
+      peerConnectionsRef.current = {};
+      Object.values(remoteAudioElementsRef.current).forEach((audio) => {
+        try {
+          audio.pause();
+          audio.srcObject = null;
+        } catch (e) {}
+      });
+      remoteAudioElementsRef.current = {};
     };
   }, [roomId, userName, topic, durationMinutes]);
 
@@ -1620,6 +1798,15 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
 
+      // Add local audio tracks to all active WebRTC peer connections
+      Object.values(peerConnectionsRef.current).forEach((pc) => {
+        const senders = pc.getSenders();
+        const hasAudio = senders.some((s) => s.track && s.track.kind === "audio");
+        if (!hasAudio) {
+          stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+        }
+      });
+
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (AudioCtx) {
         const audioCtx = new AudioCtx();
@@ -1806,11 +1993,39 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
     setIsMicActive((prev) => {
       const nextState = !prev;
       isMicActiveRef.current = nextState;
-      isMutedRef.current = !nextState;
+      const isMutedNow = !nextState;
+      isMutedRef.current = isMutedNow;
 
       setParticipants((prevList) =>
-        prevList.map((p) => (p.id === "user" ? { ...p, isMuted: !nextState } : p))
+        prevList.map((p) => (p.id === "user" ? { ...p, isMuted: isMutedNow } : p))
       );
+
+      // Sync mute status to backend
+      fetch(`${BACKEND_URL}/api/room/mute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          user_id: myId,
+          is_muted: isMutedNow,
+        }),
+      }).catch(() => {});
+
+      // Sync via BroadcastChannel
+      if (broadcastChannelRef.current) {
+        broadcastChannelRef.current.postMessage({
+          type: "PEER_MUTE",
+          userId: myId,
+          isMuted: isMutedNow,
+        });
+      }
+
+      // Mute/unmute local WebRTC audio tracks
+      if (micStreamRef.current) {
+        micStreamRef.current.getAudioTracks().forEach((track) => {
+          track.enabled = nextState;
+        });
+      }
 
       if (nextState) {
         // Turn Mic ON: start speech recognition and audio tracks

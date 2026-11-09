@@ -117,6 +117,7 @@ async def join_room(payload: dict):
         "is_hand_raised": existing_p.get("is_hand_raised", False),
         "last_speech": existing_p.get("last_speech", ""),
         "is_speaking": existing_p.get("is_speaking", False),
+        "is_muted": existing_p.get("is_muted", payload.get("is_muted", False)),
     }
 
     return {
@@ -198,6 +199,72 @@ async def broadcast_speech(payload: dict):
         rooms_db[room_id]["participants"][user_id]["is_speaking"] = is_speaking
         return {"status": "ok"}
     return {"status": "error"}
+
+
+@app.post("/api/room/mute")
+async def toggle_mute(payload: dict):
+    room_id = payload.get("room_id")
+    user_id = payload.get("user_id")
+    is_muted = payload.get("is_muted", False)
+
+    if room_id in rooms_db and user_id in rooms_db[room_id]["participants"]:
+        rooms_db[room_id]["participants"][user_id]["is_muted"] = is_muted
+        return {"status": "ok", "is_muted": is_muted}
+    return {"status": "error", "message": "User or room not found"}
+
+
+@app.post("/api/room/signal")
+async def post_signal(payload: dict):
+    room_id = payload.get("room_id")
+    from_id = payload.get("from_id")
+    to_id = payload.get("to_id")
+    signal_data = payload.get("signal")
+    signal_type = payload.get("type", "webrtc")
+
+    if not room_id or not from_id or not signal_data:
+        return {"status": "error", "message": "Invalid signal payload"}
+
+    if room_id not in rooms_db:
+        rooms_db[room_id] = {
+            "topic": "Group Discussion",
+            "duration": 300,
+            "timer_running": False,
+            "timer_start_time": None,
+            "participants": {},
+            "active_agents": [],
+            "session_ended": False,
+            "signals": [],
+        }
+
+    signals = rooms_db[room_id].setdefault("signals", [])
+    signals.append({
+        "id": f"sig_{time.time()}_{from_id}_{len(signals)}",
+        "from_id": from_id,
+        "to_id": to_id,
+        "type": signal_type,
+        "signal": signal_data,
+        "timestamp": time.time(),
+    })
+
+    if len(signals) > 150:
+        rooms_db[room_id]["signals"] = signals[-150:]
+
+    return {"status": "ok"}
+
+
+@app.get("/api/room/{room_id}/signals")
+async def get_signals(room_id: str, user_id: str, since: float = 0.0):
+    if room_id not in rooms_db:
+        return {"signals": [], "server_time": time.time()}
+
+    signals = rooms_db[room_id].get("signals", [])
+    matched = [
+        s for s in signals
+        if s.get("timestamp", 0) > since
+        and s.get("from_id") != user_id
+        and (s.get("to_id") is None or s.get("to_id") == user_id)
+    ]
+    return {"signals": matched, "server_time": time.time()}
 
 
 @app.post("/api/room/leave")
