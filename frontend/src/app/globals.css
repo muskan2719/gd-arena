@@ -1,0 +1,179 @@
+@import "tailwindcss";
+
+:root {
+  --canvas-bg: #F8F8F9;
+  --text-dark: #111439;
+  --text-white: #F8F8F9;
+  --pastel-purple: #C5ADC5;
+  --light-steel-blue: #B2B5E0;
+  --malachite-green: #31EC56;
+  --heliotrope-purple: #EE72F8;
+  --razzmatazz-pink: #EF036C;
+}
+
+@theme inline {
+  --color-canvas: var(--canvas-bg);
+  --color-text-dark: var(--text-dark);
+  --color-text-white: var(--text-white);
+  --color-pastel-purple: var(--pastel-purple);
+  --color-steel-blue: var(--light-steel-blue);
+  --color-malachite: var(--malachite-green);
+  --color-heliotrope: var(--heliotrope-purple);
+  --color-razzmatazz: var(--razzmatazz-pink);
+}
+
+/* Sharp, Crisp Text Rendering without subpixel blurring */
+html, body {
+  background-color: #F8F8F9;
+  background: radial-gradient(circle at 50% 0%, #FFFFFF 0%, #F8F8F9 60%, #E9EBF8 100%);
+  color: #111439;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  min-height: 100vh;
+}
+
+/* 3-Stage Scroll Animation Keyframes & Classes */
+@keyframes hero-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes hero-slide-up {
+  0% {
+    opacity: 0;
+    transform: translateY(35px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-hero-title {
+  animation: hero-pop 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-hero-desc {
+  animation: hero-slide-up 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.15s forwards;
+  opacity: 0;
+}
+
+/* Stage 2 3D Perspective Container */
+.pathway-grid-perspective {
+  perspective: 1200px;
+  transform-style: preserve-3d;
+}
+
+/* Stage 2 Pathway Cards - 100% visible by default, never opacity: 0 */
+.pathway-card-topic,
+.pathway-card-jd {
+  opacity: 1 !important;
+  will-change: transform, box-shadow, border-color;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+
+/* Prominent Neon Gradient Border Accents */
+.card-neon-topic {
+  background: linear-gradient(145deg, rgba(20, 25, 68, 0.9), rgba(17, 20, 57, 0.85));
+  border: 2px solid rgba(49, 236, 86, 0.45);
+  box-shadow: 0 0 25px rgba(49, 236, 86, 0.22), 0 0 50px rgba(197, 173, 197, 0.15), 0 15px 35px rgba(0, 0, 0, 0.4);
+}
+
+.card-neon-topic:hover {
+  border-color: #31EC56 !important;
+  box-shadow: 0 0 35px rgba(49, 236, 86, 0.55), 0 0 60px rgba(197, 173, 197, 0.3), 0 20px 45px rgba(0, 0, 0, 0.5) !important;
+}
+
+.card-neon-jd {
+  background: linear-gradient(145deg, rgba(20, 25, 68, 0.9), rgba(17, 20, 57, 0.85));
+  border: 2px solid rgba(238, 114, 248, 0.45);
+  box-shadow: 0 0 25px rgba(238, 114, 248, 0.22), 0 0 50px rgba(178, 181, 224, 0.15), 0 15px 35px rgba(0, 0, 0, 0.4);
+}
+
+.card-neon-jd:hover {
+  border-color: #EE72F8 !important;
+  box-shadow: 0 0 35px rgba(238, 114, 248, 0.55), 0 0 60px rgba(178, 181, 224, 0.3), 0 20px 45px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* Active Glow Border Pulse when card is selected */
+@keyframes active-border-pulse-topic {
+  0%, 100% {
+    box-shadow: 0 0 25px rgba(49, 236, 86, 0.4), 0 0 50px rgba(197, 173, 197, 0.25), 0 20px 40px rgba(0, 0, 0, 0.5);
+    border-color: #31EC56;
+  }
+  50% {
+    box-shadow: 0 0 45px rgba(49, 236, 86, 0.8), 0 0 70px rgba(197, 173, 197, 0.45), 0 20px 40px rgba(0, 0, 0, 0.6);
+    border-color: rgba(49, 236, 86, 1);
+  }
+}
+
+@keyframes active-border-pulse-jd {
+  0%, 100% {
+    box-shadow: 0 0 25px rgba(238, 114, 248, 0.4), 0 0 50px rgba(178, 181, 224, 0.25), 0 20px 40px rgba(0, 0, 0, 0.5);
+    border-color: #EE72F8;
+  }
+  50% {
+    box-shadow: 0 0 45px rgba(238, 114, 248, 0.8), 0 0 70px rgba(178, 181, 224, 0.45), 0 20px 40px rgba(0, 0, 0, 0.6);
+    border-color: rgba(238, 114, 248, 1);
+  }
+}
+
+.pathway-selected-topic {
+  animation: active-border-pulse-topic 2s infinite ease-in-out !important;
+  border-color: #31EC56 !important;
+}
+
+.pathway-selected-jd {
+  animation: active-border-pulse-jd 2s infinite ease-in-out !important;
+  border-color: #EE72F8 !important;
+}
+
+/* Crisp Glassmorphism without text blurring */
+.frosted-card {
+  background: rgba(21, 25, 69, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(178, 181, 224, 0.25);
+  pointer-events: auto;
+}
+
+/* Speaking pulse */
+@keyframes speaking-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(49, 236, 86, 0.5);
+  }
+  50% {
+    transform: scale(1.03);
+    box-shadow: 0 0 0 10px rgba(49, 236, 86, 0);
+  }
+}
+
+.animate-speaking {
+  animation: speaking-pulse 2s infinite ease-in-out;
+}
+
+/* Smooth custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #F8F8F9;
+}
+::-webkit-scrollbar-thumb {
+  background: #C5ADC5;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #B2B5E0;
+}
