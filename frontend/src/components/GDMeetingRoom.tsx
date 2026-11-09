@@ -29,6 +29,8 @@ export interface ParticipantItem {
   isHuman: boolean;
   isSelf?: boolean;
   is_agent?: boolean;
+  isHandRaised?: boolean;
+  lastSpeech?: string;
 }
 
 interface PeerParticipant {
@@ -36,6 +38,8 @@ interface PeerParticipant {
   name: string;
   isSpeaking: boolean;
   isMuted: boolean;
+  isHandRaised?: boolean;
+  lastSpeech?: string;
 }
 
 export interface AgentPersona {
@@ -249,6 +253,48 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
   // Continuous speech buffer for silence detection handoff
   const speechBufferRef = useRef<string>("");
   const isRecognizingRef = useRef<boolean>(false);
+  const lastSyncedPeerSpeechRef = useRef<Record<string, string>>({});
+  const lastBroadcastTimeRef = useRef<number>(0);
+
+  const broadcastSpeechToBackend = (transcriptText: string, isSpeaking: boolean) => {
+    const now = Date.now();
+    if (!isSpeaking || now - lastBroadcastTimeRef.current > 750) {
+      lastBroadcastTimeRef.current = now;
+      fetch(`${BACKEND_URL}/api/room/broadcast_speech`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          user_id: myId,
+          transcript: transcriptText,
+          is_speaking: isSpeaking,
+        }),
+      }).catch(() => {});
+    }
+  };
+
+  const handleToggleHandRaise = () => {
+    const nextVal = !isHandRaised;
+    setIsHandRaised(nextVal);
+
+    fetch(`${BACKEND_URL}/api/room/raise_hand`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        room_id: roomId,
+        user_id: myId,
+        is_hand_raised: nextVal,
+      }),
+    }).catch(() => {});
+
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({
+        type: "PEER_HAND_RAISE",
+        userId: myId,
+        isHandRaised: nextVal,
+      });
+    }
+  };
   const recognitionRef = useRef<SpeechRecognitionType | null>(null);
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -424,19 +470,50 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
 
       if (data.participants && Array.isArray(data.participants)) {
         // Other participants from backend
-        const otherTiles = data.participants
+        const otherTiles: PeerParticipant[] = data.participants
           .filter((p: any) => p && p.id && p.id !== myId && !p.is_agent)
           .map((p: any) => {
             const existing = connectedPeersRef.current.find((cp) => cp.id === p.id);
+            const peerSpeaking = typeof p.is_speaking === "boolean" ? p.is_speaking : (existing ? existing.isSpeaking : false);
+            const peerHandRaised = typeof p.is_hand_raised === "boolean" ? p.is_hand_raised : (existing?.isHandRaised || false);
+            const peerSpeech = p.last_speech || existing?.lastSpeech || "";
+
             return {
               id: p.id,
               name: p.name || "Peer Candidate",
-              isSpeaking: existing ? existing.isSpeaking : false,
+              isSpeaking: peerSpeaking,
               isMuted: existing ? existing.isMuted : true,
+              isHandRaised: peerHandRaised,
+              lastSpeech: peerSpeech,
             };
           });
 
         setConnectedPeers(otherTiles);
+
+        // Check for active speaking peer to display live captions
+        const activeSpeakingPeer = otherTiles.find((p) => p.isSpeaking && p.lastSpeech);
+        if (activeSpeakingPeer && (!activeSpeakerIdRef.current || activeSpeakerIdRef.current === activeSpeakingPeer.id)) {
+          setActiveSpeakerCaptionName(activeSpeakingPeer.name);
+          setLiveCaption(activeSpeakingPeer.lastSpeech || "");
+          setActiveSpeakerId(activeSpeakingPeer.id);
+        }
+
+        // Commit completed peer speech to shared transcript
+        otherTiles.forEach((p) => {
+          if (p.lastSpeech && !p.isSpeaking && lastSyncedPeerSpeechRef.current[p.id] !== p.lastSpeech) {
+            lastSyncedPeerSpeechRef.current[p.id] = p.lastSpeech;
+            const alreadyExists = liveTranscriptRef.current.some(
+              (t) => t.speaker_id === p.id && t.text === p.lastSpeech
+            );
+            if (!alreadyExists) {
+              appendTranscript({
+                speaker_id: p.id,
+                speaker_name: p.name,
+                text: p.lastSpeech,
+              });
+            }
+          }
+        });
 
         // Current user tile
         const selfData = data.participants.find((p: any) => p && p.id === myId);
@@ -449,9 +526,10 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
           isHuman: true,
           isSelf: true,
           is_agent: false,
+          isHandRaised: isHandRaised,
         };
 
-        const remotePeers = otherTiles.map((p: any) => ({
+        const remotePeers = otherTiles.map((p) => ({
           id: p.id,
           name: p.name,
           role: "Friend (Peer Candidate)",
@@ -460,6 +538,8 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
           isHuman: true,
           isSelf: false,
           is_agent: false,
+          isHandRaised: p.isHandRaised,
+          lastSpeech: p.lastSpeech,
         }));
 
         const agentTiles = activeAgentIdsRef.current.map((agentId) => {
@@ -617,6 +697,29 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
                 : p
             )
           );
+        } else if (data.type === "PEER_HAND_RAISE" && data.userId) {
+          setConnectedPeers((prev) =>
+            prev.map((p) =>
+              p.id === data.userId ? { ...p, isHandRaised: data.isHandRaised } : p
+            )
+          );
+        } else if (data.type === "PEER_SPEAKING_STREAM" && data.userId) {
+          setConnectedPeers((prev) =>
+            prev.map((p) =>
+              p.id === data.userId
+                ? {
+                    ...p,
+                    isSpeaking: data.isSpeaking,
+                    lastSpeech: data.transcript,
+                  }
+                : p
+            )
+          );
+          if (data.isSpeaking && data.transcript) {
+            setActiveSpeakerCaptionName(data.userName || "Peer Candidate");
+            setLiveCaption(data.transcript);
+            setActiveSpeakerId(data.userId);
+          }
         } else if (data.type === "TRANSCRIPT_SYNC" && data.entry) {
           appendTranscript(data.entry);
           if (data.entry.speaker_id !== "user" && data.entry.speaker_id !== currentUserIdRef.current) {
@@ -1358,6 +1461,16 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
   const handleUserSpeechComplete = () => {
     if (!isMeetingActiveRef.current) return;
     const userSpeech = (speechBufferRef.current || liveCaption).trim();
+    broadcastSpeechToBackend(userSpeech, false);
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({
+        type: "PEER_SPEAKING_STREAM",
+        userId: myId,
+        userName: userName,
+        transcript: userSpeech,
+        isSpeaking: false,
+      });
+    }
     if (userSpeech.length > 0) {
       triggerUserSpeechResponse(userSpeech);
     }
@@ -1403,6 +1516,19 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
       }
 
       setActiveSpeakerCaptionName(userName);
+      const currentSpeechText = (speechBufferRef.current + " " + interim).trim();
+      if (currentSpeechText) {
+        broadcastSpeechToBackend(currentSpeechText, true);
+        if (broadcastChannelRef.current) {
+          broadcastChannelRef.current.postMessage({
+            type: "PEER_SPEAKING_STREAM",
+            userId: myId,
+            userName: userName,
+            transcript: currentSpeechText,
+            isSpeaking: true,
+          });
+        }
+      }
       // Keep green glow active while speech is being detected
       setUserSpeaking(true);
       userSpeakingRef.current = true;
@@ -2018,6 +2144,7 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
               isHuman={true}
               isSpeaking={peer.isSpeaking}
               isMuted={peer.isMuted}
+              isHandRaised={peer.isHandRaised}
               style={{
                 border: peer.isSpeaking ? "3px solid #31EC56" : "1px solid rgba(255,255,255,0.1)",
                 boxShadow: peer.isSpeaking ? "0 0 25px rgba(49,236,86,0.6)" : "none",
@@ -2110,7 +2237,7 @@ export const GDMeetingRoom: React.FC<GDMeetingRoomProps> = ({
           isCameraOff={isCameraOff}
           toggleCamera={handleToggleCamera}
           isHandRaised={isHandRaised}
-          toggleHandRaise={() => setIsHandRaised((p) => !p)}
+          toggleHandRaise={handleToggleHandRaise}
           isCaptionsOn={isCaptionsOn}
           toggleCaptions={() => setIsCaptionsOn((p) => !p)}
           onLeave={handleEndCall}

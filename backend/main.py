@@ -109,10 +109,14 @@ async def join_room(payload: dict):
     if not isinstance(rooms_db[room_id].get("participants"), dict):
         rooms_db[room_id]["participants"] = {}
 
+    existing_p = rooms_db[room_id]["participants"].get(user_id, {})
     rooms_db[room_id]["participants"][user_id] = {
         "id": user_id,
         "name": user_name,
         "is_agent": False,
+        "is_hand_raised": existing_p.get("is_hand_raised", False),
+        "last_speech": existing_p.get("last_speech", ""),
+        "is_speaking": existing_p.get("is_speaking", False),
     }
 
     return {
@@ -168,6 +172,32 @@ async def start_timer(payload: dict):
         rooms_db[room_id]["timer_start_time"] = time.time()
         return {"status": "ok", "timer_running": True}
     return {"status": "error", "message": "Room not found"}
+
+
+@app.post("/api/room/raise_hand")
+async def toggle_raise_hand(payload: dict):
+    room_id = payload.get("room_id")
+    user_id = payload.get("user_id")
+    is_raised = payload.get("is_hand_raised", False)
+
+    if room_id in rooms_db and user_id in rooms_db[room_id]["participants"]:
+        rooms_db[room_id]["participants"][user_id]["is_hand_raised"] = is_raised
+        return {"status": "ok", "is_hand_raised": is_raised}
+    return {"status": "error", "message": "User or room not found"}
+
+
+@app.post("/api/room/broadcast_speech")
+async def broadcast_speech(payload: dict):
+    room_id = payload.get("room_id")
+    user_id = payload.get("user_id")
+    transcript = payload.get("transcript", "")
+    is_speaking = payload.get("is_speaking", True)
+
+    if room_id in rooms_db and user_id in rooms_db[room_id]["participants"]:
+        rooms_db[room_id]["participants"][user_id]["last_speech"] = transcript
+        rooms_db[room_id]["participants"][user_id]["is_speaking"] = is_speaking
+        return {"status": "ok"}
+    return {"status": "error"}
 
 
 @app.post("/api/room/leave")
